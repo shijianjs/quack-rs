@@ -28,22 +28,22 @@ Thank you for contributing! Please read this document before opening a PR.
 | `rustfmt` | stable | Formatting |
 | `clippy` | stable | Linting |
 | `cargo-deny` | latest | License/advisory checks |
-| DuckDB CLI | 1.5.5 (or 1.4.4 / 1.5.0) | Live extension testing (required) |
+| DuckDB CLI | 1.5.6 (or 1.4.4 / 1.5.0 / 1.5.5) | Live extension testing (required) |
 
 Install the Rust toolchain via [rustup](https://rustup.rs/).
 
 Install DuckDB via `curl` (no system package manager needed). CI's
 `extension-load` job exercises **v1.4.4, v1.5.0, v1.5.5 and `latest`** — the
-floor, the 1.5 floor, the current release, and an early-warning signal.
-Develop against v1.5.5:
+floor, the 1.5 floor, the newest pinned release, and an early-warning signal
+(`latest` is currently v1.5.6). Develop against the current release, v1.5.6:
 
 ```bash
-curl -fsSL https://github.com/duckdb/duckdb/releases/download/v1.5.5/duckdb_cli-linux-amd64.zip \
+curl -fsSL https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip \
     -o /tmp/duckdb.zip \
     && unzip -o /tmp/duckdb.zip -d /tmp/ \
     && chmod +x /tmp/duckdb \
     && /tmp/duckdb --version
-# → v1.5.5
+# → v1.5.6
 ```
 
 ---
@@ -259,8 +259,8 @@ it as an error); test code is exempt.
 
 Example:
 ```rust
-// SAFETY: `states` is a valid array of `count` pointers, each initialized
-// by `init_callback`. We are the only owner of `inner` at this point.
+// SAFETY: `ffi.inner` came from `Box::into_raw` and has not been freed;
+// nothing else holds it, so reclaiming and dropping the box is sound.
 unsafe { drop(Box::from_raw(ffi.inner)) };
 ```
 
@@ -291,7 +291,7 @@ All other warnings are errors in CI.
 Every public item must have a doc comment. Private items with non-obvious
 semantics should also be documented. Doc comments follow these conventions:
 
-- First line: short summary (noun phrase, no trailing period)
+- First line: a one-sentence summary, ending with a period
 - `# Safety`: mandatory on every `unsafe fn`
 - `# Panics`: mandatory if the function can panic in any reachable code path
 - `# Errors`: mandatory on functions returning `Result`
@@ -306,7 +306,7 @@ quack-rs/
 ├── src/
 │   ├── abi.rs                         # `DuckDB` C Extension API ABI compatibility checking
 │   ├── appender.rs                    # Bulk data appending
-│   ├── arrow.rs                       # Arrow C Data Interface bridge (`DuckDB` 1.5.0+, `duckdb-1-5-4` feature)
+│   ├── arrow.rs                       # Arrow C Data Interface bridge (`duckdb-1-5-4` feature; floor set by the `libduckdb-sys` 1.10504.0 bindings)
 │   ├── callback.rs                    # Panic-safe callback wrapper macros for `DuckDB` extension callbacks
 │   ├── catalog.rs                     # Catalog entry lookup (`DuckDB` 1.5.0+)
 │   ├── chunk_writer.rs                # Auto-sizing chunk writer for table function scan callbacks
@@ -324,7 +324,7 @@ quack-rs/
 │   ├── file_system.rs                 # File system access (`DuckDB` 1.5.0+)
 │   ├── instance_cache.rs              # Database instance cache (`DuckDB` 1.5.0+)
 │   ├── interval.rs                    # `DuckDB` `INTERVAL` type conversion utilities
-│   ├── lib.rs                         # A production-grade Rust SDK for building `DuckDB` loadable extensions
+│   ├── lib.rs                         # Crate root: module list and crate-level docs
 │   ├── prelude.rs                     # Convenience re-exports for the most commonly used `quack-rs` items
 │   ├── query.rs                       # Running SQL from inside an extension
 │   ├── secrets.rs                     # Credential handling for extensions
@@ -493,6 +493,7 @@ quack-rs/
 │   ├── aggregate_leaks.rs             # Aggregate states `DuckDB` never destroys leak no Rust heap
 │   ├── append_metadata_cli.rs         # The `append_metadata` binary run end to end: exit status, output and the file it writes
 │   ├── ffi_roundtrip.rs               # End-to-end FFI round-trips against a real `DuckDB`
+│   ├── file_handle_close.rs           # `FileHandle`'s `Drop` when the close fails (stubbed C API)
 │   ├── handle_leaks.rs                # Every RAII handle frees what `DuckDB` allocated for it (glibc)
 │   ├── integration_test.rs            # Integration tests for `quack-rs`
 │   ├── secret_zeroize.rs              # `SecretEntry` never frees a buffer that still holds a secret
@@ -508,7 +509,7 @@ quack-rs/
 │       ├── chunk_writer.rs            # `ChunkWriter` against a chunk `DuckDB` allocated
 │       ├── collision.rs               # The scalar signature-collision check, held to `DuckDB`'s own binder
 │       ├── copy_from_columns.rs       # A typed `COPY … FROM` reader that declares a column is refused
-│       ├── file_errors.rs             # `FileHandle` reports the write and sync failures `DuckDB` reports
+│       ├── file_errors.rs             # `FileHandle` reports write, sync and seek failures, and refuses a seek past `i64::MAX`
 │       ├── handles_api.rs             # `StructWriter` child handles and `InMemoryDb::execute`'s row count
 │       ├── lifecycle.rs               # Aggregate NULL rows, name collisions, overload builders, bind-data sharing
 │       ├── list_limits.rs             # `ListBuilder` stops at `DuckDB`'s byte ceiling, not an element count
@@ -545,7 +546,7 @@ quack-rs/
 │   ├── benchmarks.yml             # Criterion benchmark execution
 │   └── README.md                  # Workflow overview and quality gate summary
 ├── CONTRIBUTING.md                # This file
-├── LESSONS.md                     # The DuckDB Rust FFI pitfalls (L1–L14, P1–P12), documented in full
+├── LESSONS.md                     # The DuckDB Rust FFI pitfalls (L1–L19, P1–P12), documented in full
 └── README.md                      # Quick start, SDK overview, badge table
 ```
 
@@ -554,7 +555,7 @@ quack-rs/
 ## PR Checklist
 
 - [ ] SPDX header on every new file
-- [ ] No file exceeds 500 lines
+- [ ] New or split files follow the 500-line guideline (exceed it only where splitting would harm cohesion)
 - [ ] `cargo fmt` passes
 - [ ] `cargo clippy --all-targets -- -D warnings` passes
 - [ ] `cargo test --all-targets` passes
@@ -572,15 +573,18 @@ quack-rs/
 ## Releasing
 
 This crate supports `libduckdb-sys = ">=1.4.4, <2"` (DuckDB 1.4.x and 1.5.x).
-The bounded range is intentional: the C API (`v1.2.0`) is stable across these releases,
+The bounded range is intentional: every one of these releases loads C API `v1.2.0` extensions,
 and the `<2` upper bound prevents silent adoption of a future major band.
 Before broadening the range to a new major band:
 
 1. Read the DuckDB changelog for C API changes.
 2. Check the new C API version string (used in `duckdb_rs_extension_api_init`).
 3. Update `DUCKDB_API_VERSION` in `src/lib.rs` if the C API version changed.
-4. Audit all callback signatures against the new `bindgen.rs` output.
-5. Update the range bounds in `Cargo.toml` (both runtime and dev-deps).
+4. Audit all callback signatures against the new `libduckdb-sys` bindings.
+5. Update the `libduckdb-sys` and `duckdb` version requirements in `Cargo.toml`.
 
-Versions follow [Semantic Versioning](https://semver.org/). Breaking changes to
-public API require a major version bump.
+Versions follow [Semantic Versioning](https://semver.org/) as Cargo applies it.
+While the crate is pre-1.0, a breaking change to the public API bumps the
+**minor** version (`0.17.x` → `0.18.0`) and is marked **Breaking:** in
+`CHANGELOG.md`; see the semantic versioning policy in
+[`RELEASING.md`](RELEASING.md).

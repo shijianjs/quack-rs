@@ -1,10 +1,13 @@
 # Pitfall Catalog
 
-All known DuckDB Rust FFI pitfalls, discovered while building
+The 31 known pitfalls of writing a DuckDB extension in Rust against the C
+extension API, with the symptom, root cause and fix for each. The first were
+found while building
 [duckdb-behavioral](https://github.com/tomtom215/duckdb-behavioral), a
-production DuckDB community extension. Every future developer who builds a Rust
-DuckDB extension will hit the majority of these. quack-rs makes most of them
-impossible.
+production DuckDB community extension; the rest while building and auditing
+quack-rs. Most of them affect any Rust extension that calls the C API
+directly, and quack-rs prevents most of them. The [summary](#summary) at the
+end lists each one with its status.
 
 ---
 
@@ -81,13 +84,17 @@ unsafe extern "C" fn state_destroy(states: *mut duckdb_aggregate_state, count: i
 }
 ```
 
+You rarely need even this wrapper: `.ffi_state::<MyState>()` on the aggregate
+builder installs `destroy_callback` together with `FfiState<MyState>`'s size and
+init callbacks.
+
 ---
 
 ## L3: No panic across FFI boundaries
 
 **Status**: Made impossible by `init_extension` and the callback guards (which require `panic = "unwind"`).
 
-**Symptom**: Extension causes DuckDB to crash or behave unpredictably.
+**Symptom**: The whole DuckDB process aborts when an extension callback panics.
 
 **Root cause**: a panic cannot unwind out of an `extern "C"` function. Since
 Rust 1.81 the runtime aborts the process when one tries (before 1.81 it was
@@ -452,8 +459,8 @@ check); CI job `test-older-engines` runs the suite against DuckDB 1.4.4 and
 **Symptom**: code tested against the release `Cargo.lock` pins (1.5.5) aborts
 or misbehaves in an older release the same binary loads into. A default-feature
 extension loads into every release from 1.4.4; a `duckdb-1-5` one built against
-the 1.5.4 bindings has the 546-slot layout of 1.5.2 to 1.5.5, so the ABI guard
-rightly lets it load into all four.
+the 1.5.4 bindings has the 546-slot layout of 1.5.2 to 1.5.6, so the ABI guard
+rightly lets it load into all five.
 
 **Root cause**: a C function's *contract* can change in a release while its
 slot stays put. `duckdb_scalar_function_bind_get_argument` gained its `try`
@@ -562,6 +569,39 @@ and of every STRUCT field and ARRAY element vector below it, down to the next
 
 ---
 
+## L19: Addresses of constants are not identities
+
+**Status**: Fixed in `FfiState` (0.18.0): its per-type tag salt is a hash of
+`TypeId::of::<T>()`, not the address of `type_name::<T>()`. [AUDIT.md](https://github.com/tomtom215/quack-rs/blob/main/AUDIT.md) 10.2
+(High) and 10.8.
+
+**Symptom**: a per-type tag compared across callbacks mismatches only in
+release builds of the user's crate — `FfiState::with_state` returns `None`,
+`destroy_callback` skips states — while debug and fat-LTO builds hide it.
+
+**Root cause**: `core::any::type_name::<T>().as_ptr()` (and a function
+pointer, and the address of any `&'static` constant) can differ between
+codegen units: `rustc` emits a private copy of a constant in each codegen unit
+that uses it, so with `codegen-units > 1` and no fat LTO (Cargo's default
+release profile) two uses of the same constant can have different addresses.
+Rust makes no address-identity guarantee for functions or constants.
+
+**Fix**: derive identity from a value, e.g. hash `TypeId::of::<T>()`.
+
+**Evidence**: a standalone crate taking `type_name::<T>().as_ptr()` for one
+`T` in 8 modules: release profile (`codegen-units = 16`, `lto = false`) → 6
+distinct addresses; dev profile → 1; `codegen-units = 1`, `lto = true` → 1.
+In quack-rs itself, `cargo test --release --lib aggregate::` with
+`CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_LTO=false`
+failed 5 tests on the address salt and passes on the `TypeId` one; the
+end-to-end suite under the same profile failed 10 of 279 (every aggregate:
+NULL or garbage results) and passes all 279. Every other
+CI build is debug or uses the repository's `codegen-units = 1`, fat-LTO
+release profile, which is why the bug got past them; CI's `test` job now
+runs this build.
+
+---
+
 ## P1: Library name must match extension name
 
 **Status**: Must be configured in `Cargo.toml`. Scaffold handles this.
@@ -583,7 +623,7 @@ crate-type = ["cdylib", "rlib"]
 
 ## P2: Metadata version is C API version, not DuckDB version
 
-**Status**: `DUCKDB_API_VERSION` constant encodes the correct value.
+**Status**: The `DUCKDB_API_VERSION` constant holds the correct value.
 
 **Symptom**: The metadata script succeeds, and `LOAD` then refuses the file:
 "The file was built for DuckDB C API version 'v1.5.5', but we can only load
@@ -592,10 +632,17 @@ and 1.5.5 with a file stamped `-dv v1.5.5`).
 
 **Root cause**: The `-dv` flag to `append_extension_metadata.py` must be the
 C API version (`v1.2.0`), not the DuckDB release version (`v1.4.4`). These are
-different strings.
+different strings. DuckDB 1.4.x and 1.5.0 – 1.5.5 declare C API version
+`v1.2.0`; 1.5.6 declares `v1.5.6` and still loads `v1.2.0` extensions.
 
 **Fix**: Use `quack_rs::DUCKDB_API_VERSION` (`"v1.2.0"`) in `init_extension`,
 and use the same version with `append_extension_metadata.py -dv v1.2.0`.
+
+This holds only for the `C_STRUCT` ABI type. For `C_STRUCT_UNSTABLE` and `CPP`,
+`-dv` is the *exact DuckDB release*: with `USE_UNSTABLE_C_API=1` (required when
+you use quack-rs's `duckdb-1-5` features; see [P10](#p10)),
+`TARGET_DUCKDB_VERSION` must be a real release such as `v1.5.6`, and `v1.2.0`
+would pin the binary to DuckDB v1.2.0. `ScaffoldConfig` validates this pairing.
 
 ---
 
@@ -721,14 +768,15 @@ miss it entirely.
 the main `libduckdb-sys` dependency) and `bundled` (pulled in by the
 `duckdb` crate's `features = ["bundled"]`) into a single `libduckdb-sys` build
 with **both features active**. In `loadable-extension` mode every DuckDB C API
-call is routed through an `AtomicPtr<fn>` dispatch table, which is normally
-populated at extension-load time when DuckDB calls
-`duckdb_rs_extension_api_init`. In `cargo test`, no DuckDB host process loads
-the extension, so the table stays uninitialised and every call panics.
+call is routed through a dispatch table of one `AtomicPtr` per function, which
+is normally populated at load time, when DuckDB calls the extension's entry
+point and the entry point calls `duckdb_rs_extension_api_init`. In
+`cargo test`, no DuckDB host process loads the extension, so the table stays
+uninitialised and every call panics.
 
 **Discovery**: This was triggered by the crates.io release workflow (which runs
-`--all-features`) failing on macOS. Regular CI (`--no-default-features`,
-`--all-targets`) never compiled the `bundled-test` path, so the bug was hidden
+`cargo test --all-targets --all-features`) failing on macOS. Regular CI at the time
+(`cargo test --all-targets`, no `--all-features`) never compiled the `bundled-test` path, so the bug was hidden
 during development and code review.
 
 **Fix** (implemented in quack-rs 0.6.0):
@@ -745,20 +793,25 @@ during development and code review.
    ```
 
 2. `build.rs` — compiles the shim (via the `cc` crate) only when the
-   `bundled-test` feature is active, locating the DuckDB headers from the
-   `libduckdb-sys` build output directory.
+   `bundled-test` or `bundled-test-prebuilt` feature is active. It finds the
+   DuckDB headers through `DEP_DUCKDB_INCLUDE` (published by
+   `libduckdb-sys >= 1.10503`), falling back to the `libduckdb-sys` build
+   output directory or, for a prebuilt library, `DUCKDB_INCLUDE_DIR`.
 
 3. `InMemoryDb::open()` — calls `init_dispatch_table_once()` before opening
    the connection. That function calls `quack_rs_create_api_v1()` once and
    feeds the result through `duckdb_rs_extension_api_init`, populating every
    `AtomicPtr` slot in the dispatch table, one per field of `duckdb_ext_api_v1`
-   (546 with the 1.5.2 – 1.5.5 bindings, 459 with 1.4.x; see the table in
+   (546 with the 1.5.2 – 1.5.6 bindings, 459 with 1.4.x; see the table in
    [ABI Compatibility](../concepts/abi.md)). A `std::sync::Once` guard makes it
    safe to call from any number of threads and test cases.
 
 4. CI `test-bundled` job — runs
-   `cargo test --all-targets --features bundled-test` on Linux, macOS, and
-   Windows on every PR, so this class of failure is caught before release.
+   `cargo test --all-targets --features bundled-test` and then the release
+   workflow's own `cargo test --all-targets --all-features` on Linux, macOS
+   and Windows on every PR. The second step was added after the v0.18.0 tag
+   failed on Windows while PR CI was green: until then no PR job ran the
+   `duckdb-1-5*` tests on macOS or Windows.
 
 **ABI compatibility note**: DuckDB's `duckdb_ext_api_v1` struct is defined
 identically in both the public `duckdb_extension.h` (used by `libduckdb-sys`
@@ -795,7 +848,7 @@ it at compiled-in offsets. The struct has two regions:
 
 | Region | Slots | Guarantee |
 |--------|-------|-----------|
-| Stable | 0–356 | Frozen since v1.2.0 — same slots, order and signatures in every release through v1.5.5 (two slots, 114 and 138, were renamed `varint` → `bignum` in v1.4.0 with an identical struct layout) |
+| Stable | 0–356 | Frozen since v1.2.0 — same slots, order and signatures in every release through v1.5.6 (two slots, 114 and 138, were renamed `varint` → `bignum` in v1.4.0 with an identical struct layout) |
 | Unstable | 357+ | `DuckDB` **inserts** entries in the middle, shifting every later slot |
 
 `duckdb_appender_clear` landed at slot 410 in v1.5.0 and
@@ -803,8 +856,12 @@ it at compiled-in offsets. The struct has two regions:
 moves everything after it. An extension compiled against one layout and loaded
 by another calls the wrong function through the right offset.
 
-**Your action**: nothing, if you use `init_extension` — it verifies the layout
-and refuses a mismatch. Two knobs matter:
+**Your action**: use `init_extension`, which verifies the layout and refuses a
+mismatch. If you enable a `duckdb-1-5*` feature, also stamp the binary
+`C_STRUCT_UNSTABLE` with the exact DuckDB release (`USE_UNSTABLE_C_API=1` and a
+real `TARGET_DUCKDB_VERSION`, or `append_metadata --abi-type C_STRUCT_UNSTABLE
+--duckdb-version vX.Y.Z`), so that DuckDB itself refuses to load it into any
+other release. Two knobs matter:
 
 - `QUACK_RS_TARGET_DUCKDB_VERSION` at build time stamps the release you built
   against, so a `DuckDB` newer than quack-rs's table is still accepted when your
@@ -815,7 +872,8 @@ and refuses a mismatch. Two knobs matter:
   default.
 
 If your extension enables no `duckdb-1-5*` feature it only calls into the stable
-prefix, and `StableOnly` accepts every release from v1.2.0 on.
+prefix: the check reports `AbiCheck::StableOnly`, and the extension loads into
+every release from v1.2.0 on.
 
 ---
 
@@ -850,7 +908,9 @@ only reliable check is reading the implementation in `DuckDB`'s
 **Your action**: before calling `duckdb_free` on anything the C API returned,
 read the implementation. `const char *` is a strong hint that it is borrowed,
 but `duckdb_parameter_name` proves it is only a hint. Every `duckdb_free` site
-in quack-rs was audited this way — see `LESSONS.md` P11 for the full table.
+in quack-rs was audited this way; see
+[`LESSONS.md` P11](https://github.com/tomtom215/quack-rs/blob/main/LESSONS.md#p11-const-char--returns-are-borrowed--freeing-one-corrupts-the-heap)
+for the full table.
 
 **How it was found**: by writing the first live test for copy functions. The
 module had 16 unit tests and none of them registered a copy function against a
@@ -922,6 +982,7 @@ SELECT count(*) FROM duckdb_settings() WHERE name = 'my_setting';
 | L16: Arrow layouts DuckDB misimports | Prevented | `data_chunk_from_arrow` refuses them |
 | L17: `COPY … FROM` reader declares columns | Prevented (typed) / Documented | Read the target's columns; declare none |
 | L18: `LIST` reserve moves nested buffers | Documented | Fetch writers again after each reserve |
+| L19: constant addresses as identities | Fixed | `FfiState` salts its tag with a hash of `TypeId` |
 | P1: lib name mismatch | Scaffold | Set `[lib] name` in `Cargo.toml` |
 | P2: API version string | Constant | Use `DUCKDB_API_VERSION` |
 | P3: unit tests insufficient | Documented | Write SQLLogicTest E2E tests |

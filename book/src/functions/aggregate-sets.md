@@ -1,7 +1,9 @@
 # Overloading with Function Sets
 
-DuckDB supports multiple signatures for the same function name via **function sets**.
-This is how you implement variadic aggregates like `retention(c1, c2, ..., c32)`.
+A DuckDB aggregate function can have several signatures under one name, registered
+together as a **function set**. This page shows how to overload an aggregate
+function in Rust with `AggregateFunctionSetBuilder`, including variadic aggregates
+such as `retention(c1, c2, ..., c32)` and overloads with different return types.
 
 > **Known DuckDB limitation.** C-API aggregates — including every overload in a
 > set — read out of bounds under `agg(x) OVER ()` (whole-partition window frames)
@@ -32,12 +34,11 @@ For a single signature, use `AggregateFunctionBuilder` directly.
 # use libduckdb_sys::{duckdb_aggregate_state, duckdb_bind_info, duckdb_connection,
 #     duckdb_data_chunk, duckdb_function_info, duckdb_init_info, duckdb_vector, idx_t};
 # use quack_rs::prelude::*;
-# unsafe extern "C" fn state_size(_: duckdb_function_info) -> idx_t { 0 }
-# unsafe extern "C" fn state_init(_: duckdb_function_info, _: duckdb_aggregate_state) {}
+# #[derive(Default)] struct RetentionState { hits: u32 }
+# impl AggregateState for RetentionState {}
 # unsafe extern "C" fn update(_: duckdb_function_info, _: duckdb_data_chunk, _: *mut duckdb_aggregate_state) {}
 # unsafe extern "C" fn combine(_: duckdb_function_info, _: *mut duckdb_aggregate_state, _: *mut duckdb_aggregate_state, _: idx_t) {}
 # unsafe extern "C" fn finalize(_: duckdb_function_info, _: *mut duckdb_aggregate_state, _: duckdb_vector, _: idx_t, _: idx_t) {}
-# unsafe extern "C" fn state_destroy(_: *mut duckdb_aggregate_state, _: idx_t) {}
 use quack_rs::aggregate::AggregateFunctionSetBuilder;
 use quack_rs::types::TypeId;
 
@@ -48,12 +49,10 @@ unsafe fn register(con: duckdb_connection) -> Result<(), ExtensionError> {
             .overloads(2..=3, |n, builder| {
                 // Each overload gets `n` BOOLEAN parameters
                 let b = (0..n).fold(builder, |b, _| b.param(TypeId::Boolean));
-                b.state_size(state_size)
-                    .init(state_init)
+                b.ffi_state::<RetentionState>() // state_size + init + destructor
                     .update(update)
                     .combine(combine)
                     .finalize(finalize)
-                    .destructor(state_destroy)
             })
             .register(con)?;
     }
@@ -61,9 +60,9 @@ unsafe fn register(con: duckdb_connection) -> Result<(), ExtensionError> {
 }
 ```
 
-The `overloads` method accepts a `RangeInclusive<usize>` and a closure that
-receives the arity `n` and a fresh `AggregateOverloadBuilder`. The builder sets
-the function name on each individual member internally.
+`overloads` takes a `RangeInclusive<usize>` and a closure, called once per arity
+`n` with a fresh `AggregateOverloadBuilder`, that returns the configured overload.
+The set builder gives every member the set's name when it registers them.
 
 ---
 
@@ -86,13 +85,13 @@ Set the return type on the overload with `AggregateOverloadBuilder::returns` (or
 # use libduckdb_sys::{duckdb_aggregate_state, duckdb_bind_info, duckdb_connection,
 #     duckdb_data_chunk, duckdb_function_info, duckdb_init_info, duckdb_vector, idx_t};
 # use quack_rs::prelude::*;
-# unsafe extern "C" fn int_state_size(_: duckdb_function_info) -> idx_t { 0 }
-# unsafe extern "C" fn int_init(_: duckdb_function_info, _: duckdb_aggregate_state) {}
+# #[derive(Default)] struct IntState { sum: i64 }
+# impl AggregateState for IntState {}
 # unsafe extern "C" fn int_update(_: duckdb_function_info, _: duckdb_data_chunk, _: *mut duckdb_aggregate_state) {}
 # unsafe extern "C" fn int_combine(_: duckdb_function_info, _: *mut duckdb_aggregate_state, _: *mut duckdb_aggregate_state, _: idx_t) {}
 # unsafe extern "C" fn int_finalize(_: duckdb_function_info, _: *mut duckdb_aggregate_state, _: duckdb_vector, _: idx_t, _: idx_t) {}
-# unsafe extern "C" fn str_state_size(_: duckdb_function_info) -> idx_t { 0 }
-# unsafe extern "C" fn str_init(_: duckdb_function_info, _: duckdb_aggregate_state) {}
+# #[derive(Default)] struct StrState { longest: String }
+# impl AggregateState for StrState {}
 # unsafe extern "C" fn str_update(_: duckdb_function_info, _: duckdb_data_chunk, _: *mut duckdb_aggregate_state) {}
 # unsafe extern "C" fn str_combine(_: duckdb_function_info, _: *mut duckdb_aggregate_state, _: *mut duckdb_aggregate_state, _: idx_t) {}
 # unsafe extern "C" fn str_finalize(_: duckdb_function_info, _: *mut duckdb_aggregate_state, _: duckdb_vector, _: idx_t, _: idx_t) {}
@@ -100,34 +99,37 @@ Set the return type on the overload with `AggregateOverloadBuilder::returns` (or
 use quack_rs::aggregate::{AggregateFunctionSetBuilder, AggregateOverloadBuilder};
 use quack_rs::types::TypeId;
 
-AggregateFunctionSetBuilder::new("my_agg")
-    .overload(
-        AggregateOverloadBuilder::new()
-            .param(TypeId::Integer)
-            .returns(TypeId::Integer)      // my_agg(INTEGER) -> INTEGER
-            .state_size(int_state_size)
-            .init(int_init)
-            .update(int_update)
-            .combine(int_combine)
-            .finalize(int_finalize),
-    )
-    .overload(
-        AggregateOverloadBuilder::new()
-            .param(TypeId::Varchar)
-            .returns(TypeId::Varchar)      // my_agg(VARCHAR) -> VARCHAR
-            .state_size(str_state_size)
-            .init(str_init)
-            .update(str_update)
-            .combine(str_combine)
-            .finalize(str_finalize),
-    )
-    .register(con)?;
+unsafe {
+    AggregateFunctionSetBuilder::new("my_agg")
+        .overload(
+            AggregateOverloadBuilder::new()
+                .param(TypeId::Integer)
+                .returns(TypeId::Integer)      // my_agg(INTEGER) -> INTEGER
+                .ffi_state::<IntState>()
+                .update(int_update)
+                .combine(int_combine)
+                .finalize(int_finalize),
+        )
+        .overload(
+            AggregateOverloadBuilder::new()
+                .param(TypeId::Varchar)
+                .returns(TypeId::Varchar)      // my_agg(VARCHAR) -> VARCHAR
+                .ffi_state::<StrState>()
+                .update(str_update)
+                .combine(str_combine)
+                .finalize(str_finalize),
+        )
+        .register(con)?;
+}
 # Ok(())
 # }
 ```
 
 Each overload carries its own callbacks, so overloads with different parameter
-types can use different state types.
+types can use different state types: call `ffi_state::<T>()` on each overload
+with that overload's state type (`AggregateFunctionSetBuilder` itself has no
+`ffi_state`), and read it in that overload's `update`, `combine` and `finalize`
+with `FfiState::<T>::with_state` / `with_state_mut` for the same `T`.
 
 ### Which return type wins
 
@@ -139,14 +141,20 @@ For each overload, in order:
 4. `AggregateFunctionSetBuilder::returns` (the set-level default)
 
 Registration fails, naming the overload index, if an overload reaches the end of
-that list with nothing set, or is missing a required callback. Both are checked
-for every overload before any DuckDB handle is created.
+that list with nothing set or is missing a required callback. It also fails if
+two overloads take the same parameter types. All of this is checked for every
+overload before any DuckDB handle is created.
+
+### Other per-overload settings
 
 Each overload can also carry its own `extra_info`
 (`AggregateOverloadBuilder::extra_info`), read in that overload's callbacks with
 `AggregateFunctionInfo::get_extra_info`. Ownership works as on
 `AggregateFunctionBuilder`: DuckDB frees it once registration has handed it over,
 even if registration then fails; the builder frees it if it never gets that far.
+
+`AggregateOverloadBuilder::null_handling` sets an overload's
+[NULL handling](null-handling.md#aggregate-functions).
 
 `overload` and `overloads` may be mixed on one builder; overloads register in
 the order they were added.
@@ -163,12 +171,12 @@ the order they were added.
 > `duckdb_aggregate_function`** via `duckdb_aggregate_function_set_name`, not just on the set.
 > If any member lacks a name, it is **silently not registered** — no error is returned.
 >
-> This is completely undocumented. It was discovered by reading DuckDB's C++ test code at
+> DuckDB's C API documentation does not mention this. It was found by reading DuckDB's C++ test code at
 > `test/api/capi/test_capi_aggregate_functions.cpp`. In `duckdb-behavioral`, 6 of 7 functions
 > failed to register silently due to this bug.
 
-`AggregateFunctionSetBuilder` enforces that each member has its name set internally
-when the `overloads` closure builds each function.
+`AggregateFunctionSetBuilder::register` calls `duckdb_aggregate_function_set_name`
+on every member, whether it was added with `overload` or `overloads`.
 
 See [Pitfall L6](../reference/pitfalls.md#l6-function-set-name-must-be-set-on-each-member).
 
@@ -183,28 +191,27 @@ builder as a default, rather than repeating it on every overload:
 # use libduckdb_sys::{duckdb_aggregate_state, duckdb_bind_info, duckdb_connection,
 #     duckdb_data_chunk, duckdb_function_info, duckdb_init_info, duckdb_vector, idx_t};
 # use quack_rs::prelude::*;
-# unsafe extern "C" fn state_size(_: duckdb_function_info) -> idx_t { 0 }
-# unsafe extern "C" fn state_init(_: duckdb_function_info, _: duckdb_aggregate_state) {}
+# #[derive(Default)] struct RetentionState { hits: u32 }
+# impl AggregateState for RetentionState {}
 # unsafe extern "C" fn update(_: duckdb_function_info, _: duckdb_data_chunk, _: *mut duckdb_aggregate_state) {}
 # unsafe extern "C" fn combine(_: duckdb_function_info, _: *mut duckdb_aggregate_state, _: *mut duckdb_aggregate_state, _: idx_t) {}
 # unsafe extern "C" fn finalize(_: duckdb_function_info, _: *mut duckdb_aggregate_state, _: duckdb_vector, _: idx_t, _: idx_t) {}
-# unsafe extern "C" fn destroy(_: *mut duckdb_aggregate_state, _: idx_t) {}
 # unsafe fn demo(con: duckdb_connection) -> Result<(), ExtensionError> {
 use quack_rs::aggregate::AggregateFunctionSetBuilder;
 use quack_rs::types::{LogicalType, TypeId};
 
-AggregateFunctionSetBuilder::new("retention")
-    .returns_logical(LogicalType::list(TypeId::Boolean))  // default for every overload
-    .overloads(2..=32, |n, builder| {
-        (0..n).fold(builder, |b, _| b.param(TypeId::Boolean))
-            .state_size(state_size)
-            .init(state_init)
-            .update(update)
-            .combine(combine)
-            .finalize(finalize)
-            .destructor(destroy)
-    })
-    .register(con)?;
+unsafe {
+    AggregateFunctionSetBuilder::new("retention")
+        .returns_logical(LogicalType::list(TypeId::Boolean))  // default for every overload
+        .overloads(2..=32, |n, builder| {
+            (0..n).fold(builder, |b, _| b.param(TypeId::Boolean))
+                .ffi_state::<RetentionState>()
+                .update(update)
+                .combine(combine)
+                .finalize(finalize)
+        })
+        .register(con)?;
+}
 # Ok(())
 # }
 ```
@@ -231,12 +238,9 @@ Individual overloads can also use `param_logical` for complex parameter types:
 
 ## Why not varargs?
 
-DuckDB's C API does not provide `duckdb_aggregate_function_set_varargs`. For true variadic
-aggregates, you must register N overloads — one for each supported arity. Function sets make
-this tractable.
+DuckDB's C API has no `duckdb_aggregate_function_set_varargs`. A variadic aggregate
+must therefore be registered as one overload per supported arity, which `overloads`
+does in one call.
 
-> **Note**: **Scalar** functions support varargs directly via
-> `ScalarFunctionBuilder::varargs()` (stable C API, no feature flag needed). This limitation
-> still applies to aggregate functions, which have no varargs counterpart in the C API.
-
-ADR-002 in the architecture docs explains this design decision in detail.
+> **Note**: **Scalar** functions do support varargs, through
+> `ScalarFunctionBuilder::varargs()` (stable C API, no feature flag needed).

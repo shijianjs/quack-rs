@@ -5,7 +5,7 @@
 
 //! # quack-rs
 //!
-//! A production-grade Rust SDK for building `DuckDB` loadable extensions.
+//! A Rust SDK for building `DuckDB` loadable extensions on the `DuckDB` C Extension API.
 //!
 //! ## Overview
 //!
@@ -16,7 +16,8 @@
 //! - Type-safe builders for registering aggregate functions ([`aggregate`])
 //! - Safe vector reading and writing helpers ([`vector`])
 //! - A generic [`FfiState<T>`][aggregate::state::FfiState] that eliminates raw pointer management
-//! - Documented solutions to every known `DuckDB` Rust FFI pitfall
+//! - Documentation of every known `DuckDB` Rust FFI pitfall, with API designs that
+//!   prevent most of them
 //!
 //! ## Quick Start
 //!
@@ -206,10 +207,11 @@ pub mod table_description;
 
 /// The `DuckDB` C API version string required by [`duckdb_rs_extension_api_init`][libduckdb_sys::duckdb_rs_extension_api_init].
 ///
-/// This constant corresponds to every `DuckDB` release from v1.4.x through
-/// v1.5.5: the C extension API version has remained `v1.2.0` across all of them
-/// (`DUCKDB_EXTENSION_API_VERSION_{MAJOR,MINOR,PATCH}` in v1.5.5's
-/// `duckdb_extension.h` are 1, 2, 0). If you are targeting a different
+/// Every `DuckDB` release from v1.4.x through v1.5.5 declares C extension API
+/// version `v1.2.0` (`DUCKDB_EXTENSION_API_VERSION_{MAJOR,MINOR,PATCH}` in
+/// v1.5.5's `duckdb_extension.h` are 1, 2, 0). v1.5.6 declares `v1.5.6` and,
+/// like every release, loads any C API version up to its own, so `v1.2.0`
+/// works across the whole supported range. If you are targeting a different
 /// `DuckDB` release, read that value from its `duckdb_extension.h`.
 ///
 /// # Pitfall P2: C API version ≠ `DuckDB` release version

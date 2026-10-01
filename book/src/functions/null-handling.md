@@ -1,22 +1,28 @@
-# NULL Handling
+# NULL Handling in Functions
+
+This page explains how NULL inputs reach the scalar and aggregate functions of a
+DuckDB extension written in Rust, and how to give them SQL NULL semantics.
 
 > **The one thing to take away:** for a **scalar** function, `DefaultNullHandling`
 > does *not* make DuckDB return NULL for you. Your callback is invoked for NULL
 > rows too, and if it writes a value there, that value is the answer. Call
-> `DataChunk::propagate_nulls` — or use `ScalarFunctionBuilder::map1` /
-> `map2`, which do it for you.
+> `DataChunk::propagate_nulls`, or use `ScalarFunctionBuilder::map1` /
+> `map2`, which do it for you. An aggregate's `update` likewise receives NULL
+> rows under either setting.
 
 ---
 
 ## What DuckDB actually does
 
 DuckDB's `FunctionNullHandling` has two settings, and quack-rs mirrors them as
-[`NullHandling`]. The names suggest that the default makes the engine handle NULL
-propagation. For **aggregate** functions that is true. For **scalar** functions
-registered through the C API it is not, and the difference is silent wrong
-answers rather than an error.
+[`NullHandling`](#nullhandling-enum). The names suggest that the default makes the
+engine handle NULL propagation. For functions registered through the C API it
+does not: a scalar function's output for a NULL row is kept as written, and an
+aggregate's `update` is handed NULL rows (see
+[Aggregate functions](#aggregate-functions)). For scalars the result is silent
+wrong answers rather than an error.
 
-Two pieces of DuckDB source settle it (quoted from v1.5.4):
+For scalar functions, two pieces of DuckDB source settle it (quoted from v1.5.4):
 
 `src/main/capi/scalar_function-c.cpp` — the C API bridge calls your callback for
 the whole flattened chunk and never looks at the result's validity:
@@ -225,8 +231,8 @@ Set it anyway when it is true; it is what DuckDB expects.
 # use libduckdb_sys::{duckdb_aggregate_state, duckdb_bind_info, duckdb_connection,
 #     duckdb_data_chunk, duckdb_function_info, duckdb_init_info, duckdb_vector, idx_t};
 # use quack_rs::prelude::*;
-# unsafe extern "C" fn my_state_size(_: duckdb_function_info) -> idx_t { 0 }
-# unsafe extern "C" fn my_init(_: duckdb_function_info, _: duckdb_aggregate_state) {}
+# #[derive(Default)] struct CountState { count: i64 }
+# impl AggregateState for CountState {}
 # unsafe extern "C" fn my_update(_: duckdb_function_info, _: duckdb_data_chunk, _: *mut duckdb_aggregate_state) {}
 # unsafe extern "C" fn my_combine(_: duckdb_function_info, _: *mut duckdb_aggregate_state, _: *mut duckdb_aggregate_state, _: idx_t) {}
 # unsafe extern "C" fn my_finalize(_: duckdb_function_info, _: *mut duckdb_aggregate_state, _: duckdb_vector, _: idx_t, _: idx_t) {}
@@ -234,16 +240,17 @@ Set it anyway when it is true; it is what DuckDB expects.
 use quack_rs::aggregate::AggregateFunctionBuilder;
 use quack_rs::types::{TypeId, NullHandling};
 
-AggregateFunctionBuilder::new("count_with_nulls")
-    .param(TypeId::BigInt)
-    .returns(TypeId::BigInt)
-    .null_handling(NullHandling::SpecialNullHandling)
-    .state_size(my_state_size)
-    .init(my_init)
-    .update(my_update)   // counts rows whose value is NULL, too
-    .combine(my_combine)
-    .finalize(my_finalize)
-    .register(con)?;
+unsafe {
+    AggregateFunctionBuilder::new("count_with_nulls")
+        .param(TypeId::BigInt)
+        .returns(TypeId::BigInt)
+        .null_handling(NullHandling::SpecialNullHandling)
+        .ffi_state::<CountState>()
+        .update(my_update)   // counts rows whose value is NULL, too
+        .combine(my_combine)
+        .finalize(my_finalize)
+        .register(con)?;
+}
 # Ok(())
 # }
 ```
