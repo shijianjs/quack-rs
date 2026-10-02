@@ -10,7 +10,7 @@ authors:
 title: "quack-rs"
 abstract: "Rust SDK for building DuckDB loadable extensions on the DuckDB C Extension API."
 version: 0.18.0
-date-released: 2026-09-30
+date-released: 2026-10-02
 license: MIT
 repository-code: "https://github.com/tomtom215/quack-rs"
 url: "https://quack-rs.com"

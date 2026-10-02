@@ -10,7 +10,7 @@ quack-rs adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.18.0] — 2026-09-30
+## [0.18.0] — 2026-10-02
 
 This release comes out of a second production-readiness audit (`AUDIT.md`
 section 7) and the three passes that followed it (sections 8 to 10). Each
@@ -627,7 +627,10 @@ is not grouped.
   instead of being created at the default branch's HEAD; a re-run of
   `publish` recognises current cargo's "already exists on crates.io index"
   (it matched only the older "already uploaded"); every job has a
-  `timeout-minutes`.
+  `timeout-minutes`. A CHANGELOG section longer than GitHub's 125,000-character
+  release-body limit no longer fails the release: its introduction and a link
+  to the full section are posted instead (`scripts/release-notes-fit.py`). The
+  first release run of this version failed there.
 - The unit tests run on wasm32, the one 32-bit target quack-rs supports: the
   `wasm` job installs emsdk 6.0.10 and runs `cargo test --lib` under node,
   with and without `duckdb-1-5-4`. Before, it only compiled for wasm32, so
