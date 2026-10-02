@@ -1013,7 +1013,7 @@ functions themselves are present in every release quack-rs supports.
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for the full version history.
 
-**v0.18.0** (2026-09-30) — Fixes from four further production-readiness audits
+**v0.18.0** (2026-10-02) — Fixes from four further production-readiness audits
 (`AUDIT.md`, sections 7–10): soundness holes in the safe API, process aborts, wrong
 answers and leaks. Each fix has a regression test where one could be written, and each defect involving DuckDB
 was reproduced against a real DuckDB or derived from its source before it was

@@ -338,6 +338,15 @@ jobs:
             exit 1
           fi
 
+          # GitHub refuses a release body over 125,000 characters (HTTP 422,
+          # "body is too long"); the 0.18.0 section was 125,495 and failed the
+          # first release run at this step. Past the limit, post the section's
+          # introduction (everything before its first `### ` heading) and link
+          # to the full section in CHANGELOG.md at this tag. Characters, not
+          # bytes, are what GitHub counts, hence Python rather than `wc -c`.
+          python3 scripts/release-notes-fit.py release_notes.md \
+            "https://github.com/${{ github.repository }}/blob/v${VERSION}/CHANGELOG.md"
+
           echo "Release notes preview:"
           cat release_notes.md
           echo "::endgroup::"
