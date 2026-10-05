@@ -306,6 +306,46 @@ fn a_connection_remembers_what_it_registered() {
     }
 }
 
+/// The table-function counterpart of the test above: the entry point's
+/// `Connection` lists the table function and table macro names once and records
+/// each registration, so a name it registered itself is refused the second time
+/// without listing the catalog again. Before that snapshot existed, an extension
+/// with many table functions paid one full scan of `duckdb_functions()` — about
+/// 13 ms — per function, over a second per `LOAD`.
+#[test]
+fn a_connection_remembers_the_table_functions_it_registered() {
+    use quack_rs::table::TableFunctionBuilder;
+
+    let fx = Fixture::open();
+    // SAFETY: the fixture's handles outlive `con`.
+    let con = unsafe { Connection::from_raw(fx.con(), fx.db()) };
+    let table = |name: &str| {
+        TableFunctionBuilder::new(name)
+            .with_state::<(), _>(|bind| {
+                bind.add_result_column("x", TypeId::BigInt);
+                Ok(())
+            })
+            .scan(|(), chunk| {
+                // SAFETY: ending the scan.
+                unsafe { chunk.set_size(0) };
+                Ok(())
+            })
+            .build()
+            .expect("build")
+    };
+    // SAFETY: the connection is valid for these calls.
+    unsafe {
+        con.register_table(table("remembered_table"))
+            .expect("first");
+        con.register_table(table("remembered_table"))
+            .expect_err("second, from the snapshot");
+        con.register_table(table("range"))
+            .expect_err("built-in, from the snapshot");
+        con.register_table(table("another_table"))
+            .expect("a name neither the catalog nor this connection holds");
+    }
+}
+
 /// The same hazard in the table-function and config-option name checks: a
 /// `lower` macro made `lower(function_name) = lower($1)` true for every row,
 /// so every table function name counted as taken. Both queries now qualify

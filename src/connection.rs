@@ -257,6 +257,19 @@ pub struct Connection {
     /// instead), so what can go unseen is a scalar function registered by
     /// other code in between, whose collision the check would then miss.
     scalars: core::cell::RefCell<Option<crate::scalar::builder::collision::ExistingScalars>>,
+    /// The catalog's table function and table macro names, listed on the first
+    /// table function registration and kept up to date with this connection's
+    /// own, so the collision check costs one catalog scan per extension load
+    /// rather than one per function (see
+    /// [`TableFunctionBuilder::register`]).
+    ///
+    /// SQL run directly on the raw handle during registration — a
+    /// `CREATE MACRO … AS TABLE`, another extension's `LOAD` — is not seen by
+    /// it, so what can go unseen is such a macro created in between, whose
+    /// collision with a later table function the check would then miss.
+    ///
+    /// [`TableFunctionBuilder::register`]: crate::table::TableFunctionBuilder::register
+    tables: core::cell::RefCell<Option<crate::table::collision::ExistingTableFunctions>>,
 }
 
 impl Connection {
@@ -278,6 +291,7 @@ impl Connection {
             con,
             db,
             scalars: core::cell::RefCell::new(None),
+            tables: core::cell::RefCell::new(None),
         }
     }
 
@@ -464,7 +478,7 @@ impl Registrar for Connection {
 
     unsafe fn register_table(&self, builder: TableFunctionBuilder) -> Result<(), ExtensionError> {
         // SAFETY: self.con is valid per Connection invariant.
-        unsafe { builder.register(self.con) }
+        unsafe { builder.register_with(self.con, Some(&self.tables)) }
     }
 
     unsafe fn register_sql_macro(&self, sql_macro: SqlMacro) -> Result<(), ExtensionError> {

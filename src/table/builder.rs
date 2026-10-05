@@ -421,12 +421,37 @@ impl TableFunctionBuilder {
     ///   afterwards.
     /// - `DuckDB` reports a registration failure.
     ///
+    /// # Cost
+    ///
+    /// Each call lists the catalog once — one scan of `duckdb_functions()`,
+    /// about 13 ms on `DuckDB` 1.5.x. Registering through the entry point's
+    /// [`Connection`](crate::connection::Connection) instead (its
+    /// [`Registrar`](crate::connection::Registrar) methods) lists the catalog
+    /// once per extension load, so an extension with many table functions
+    /// pays for one scan rather than one per function.
+    ///
     /// # Safety
     ///
     /// `con` must be a valid, open `duckdb_connection`.
     pub unsafe fn register(self, con: duckdb_connection) -> Result<(), ExtensionError> {
         // SAFETY: forwarded from this method's own contract.
-        unsafe { refuse_taken_table_function_name(con, self.name()) }?;
+        unsafe { self.register_with(con, None) }
+    }
+
+    /// [`register`][Self::register], checking the name against `snapshot`
+    /// (listed on first use) instead of listing the catalog for this call.
+    ///
+    /// # Safety
+    ///
+    /// As [`register`][Self::register].
+    pub(crate) unsafe fn register_with(
+        self,
+        con: duckdb_connection,
+        snapshot: Option<&core::cell::RefCell<Option<super::collision::ExistingTableFunctions>>>,
+    ) -> Result<(), ExtensionError> {
+        let name = self.name().to_owned();
+        // SAFETY: forwarded from this method's own contract.
+        unsafe { super::collision::refuse_taken_table_function_name(con, snapshot, &name) }?;
         // SAFETY: forwarded from this method's own contract.
         let handle = unsafe { self.build_handle() }?;
 
@@ -435,11 +460,11 @@ impl TableFunctionBuilder {
         let result = unsafe { duckdb_register_table_function(con, handle.as_raw()) };
 
         if result == DuckDBSuccess {
+            super::collision::record_registered(snapshot, &name);
             Ok(())
         } else {
             Err(ExtensionError::new(format!(
                 "duckdb_register_table_function failed for '{name}': {hint}",
-                name = handle.name(),
                 hint = crate::error::REGISTRATION_FAILURE_HINT
             )))
         }
@@ -654,57 +679,6 @@ impl TableFunctionBuilder {
             name: self.name,
             param_types: param_types_for_copy_from,
         })
-    }
-}
-
-/// Refuses `name` if the system catalog already holds a table function or
-/// table macro with that name (case-insensitively).
-///
-/// See "A name can be registered once" on [`TableFunctionBuilder::register`].
-///
-/// # Safety
-///
-/// `con` must be a valid, open `duckdb_connection`.
-unsafe fn refuse_taken_table_function_name(
-    con: duckdb_connection,
-    name: &str,
-) -> Result<(), ExtensionError> {
-    let context = |detail: String| {
-        ExtensionError::new(format!(
-            "table function '{name}': cannot check whether the name is taken: {detail}"
-        ))
-    };
-    // Every function is qualified with `system.main`, so a user macro of the
-    // same name cannot change what the check computes.
-    let sql = "SELECT count(*) FROM system.main.duckdb_functions() \
-               WHERE database_name = 'system' AND schema_name = 'main' \
-               AND function_type IN ('table', 'table_macro') \
-               AND system.main.lower(function_name) = system.main.lower($1)";
-    // SAFETY: `con` is valid per this function's contract.
-    let statement =
-        unsafe { crate::query::prepare(con, sql) }.map_err(|e| context(e.to_string()))?;
-    statement
-        .bind_str(1, name)
-        .map_err(|e| context(e.to_string()))?;
-    let mut result = statement.execute().map_err(|e| context(e.to_string()))?;
-    let chunk = result
-        .next_chunk()
-        .map_err(|e| context(e.to_string()))?
-        .ok_or_else(|| context("the check returned no rows".into()))?;
-    if chunk.size() != 1 || chunk.column_count() != 1 {
-        return Err(context("the check returned an unexpected shape".into()));
-    }
-    // SAFETY: one row, one BIGINT column; `count(*)` is never NULL.
-    let taken = unsafe { chunk.reader(0).read_i64(0) };
-    if taken == 0 {
-        Ok(())
-    } else {
-        Err(ExtensionError::new(format!(
-            "table function '{name}' already exists (a built-in, another extension's, or an \
-             earlier registration). DuckDB's C API cannot add overloads to an existing table \
-             function: it would drop this registration and still report success, leaving the \
-             existing function to answer. Choose a different name."
-        )))
     }
 }
 
