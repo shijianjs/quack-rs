@@ -17,14 +17,20 @@
 //!
 //! [`TableFunctionBuilder::register`]: crate::table::TableFunctionBuilder::register
 //!
-//! Listing the catalog is a full scan of `duckdb_functions()`, about 13 ms on
-//! `DuckDB` 1.5.x, and an extension with many table functions paid that once
-//! per function — over a second per `LOAD`. [`ExistingTableFunctions`] exists
-//! to pay it once per extension load instead, the way
+//! Listing the catalog is a full scan of `duckdb_functions()` — tens of
+//! milliseconds on `DuckDB` 1.5.x, hardware-dependent — and an extension with
+//! many table functions paid that once per function, over a second per `LOAD`.
+//! [`ExistingTableFunctions`] exists to pay it once per extension load instead,
+//! the way
 //! [`ExistingScalars`][crate::scalar::builder::collision::ExistingScalars]
 //! does for scalars: the first check through a
 //! [`Connection`][crate::connection::Connection] lists every table function and
 //! table macro name into a snapshot, and later checks are a set lookup.
+//!
+//! Like the scalar snapshot, that one is a one-time copy: a table function
+//! registered on the raw connection after it was listed is not in it, and a
+//! later registration under that name passes the check. See the
+//! [`Connection`][crate::connection::Connection] field doc.
 
 use core::cell::RefCell;
 use std::collections::HashSet;
@@ -56,9 +62,7 @@ impl ExistingTableFunctions {
     /// `con` must be a valid, open connection.
     pub unsafe fn load(con: duckdb_connection) -> Result<Self, ExtensionError> {
         let context = |detail: String| {
-            ExtensionError::new(format!(
-                "cannot check whether a table function name is already taken: {detail}"
-            ))
+            ExtensionError::new(format!("cannot check whether the name is taken: {detail}"))
         };
         let sql = "SELECT function_name FROM system.main.duckdb_functions() \
                    WHERE database_name = 'system' AND schema_name = 'main' \
@@ -122,18 +126,24 @@ pub unsafe fn refuse_taken_table_function_name(
     snapshot: Option<&RefCell<Option<ExistingTableFunctions>>>,
     name: &str,
 ) -> Result<(), ExtensionError> {
+    // A listing failure is not this name's fault, but the error reads better
+    // saying which registration it interrupted.
+    let named = |e: ExtensionError| ExtensionError::new(format!("table function '{name}': {e}"));
     match snapshot {
         Some(cell) => {
             let mut slot = cell.borrow_mut();
             if slot.is_none() {
                 // SAFETY: `con` is valid per this function's contract.
-                *slot = Some(unsafe { ExistingTableFunctions::load(con) }?);
+                let listed = unsafe { ExistingTableFunctions::load(con) }.map_err(named)?;
+                *slot = Some(listed);
             }
             slot.as_ref()
                 .map_or(Ok(()), |existing| existing.check(name))
         }
         // SAFETY: as above.
-        None => unsafe { ExistingTableFunctions::load(con) }?.check(name),
+        None => unsafe { ExistingTableFunctions::load(con) }
+            .map_err(named)?
+            .check(name),
     }
 }
 
@@ -154,7 +164,32 @@ pub fn record_registered(snapshot: Option<&RefCell<Option<ExistingTableFunctions
 mod tests {
     use std::cell::RefCell;
 
-    use super::{record_registered, ExistingTableFunctions};
+    use super::{record_registered, refuse_taken_table_function_name, ExistingTableFunctions};
+
+    /// A loaded snapshot is used as-is: the check passes with a null
+    /// connection, which it can only do if the catalog is never listed — and
+    /// it does have to list the catalog to load a snapshot. This is what makes
+    /// one catalog scan per extension load rather than one per function.
+    #[test]
+    fn a_loaded_snapshot_is_used_without_touching_the_connection() {
+        let mut existing = ExistingTableFunctions::default();
+        existing.record("taken");
+        let cell = RefCell::new(Some(existing));
+        // SAFETY: the contract asks for a valid connection, and this passes a
+        // null one precisely because a loaded snapshot must not use it. If the
+        // check ever lists the catalog here, this test crashes instead of
+        // quietly costing a scan per function.
+        unsafe {
+            assert!(
+                refuse_taken_table_function_name(core::ptr::null_mut(), Some(&cell), "fresh")
+                    .is_ok()
+            );
+            assert!(
+                refuse_taken_table_function_name(core::ptr::null_mut(), Some(&cell), "TAKEN")
+                    .is_err()
+            );
+        }
+    }
 
     /// A recorded name is refused, a fresh one is accepted, and names match
     /// case-insensitively, as `DuckDB`'s catalog does.

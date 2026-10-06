@@ -392,6 +392,17 @@ impl TableFunctionBuilder {
     /// table function or table macro in the system catalog (compared
     /// case-insensitively, as `DuckDB` resolves names).
     ///
+    /// Registering through the entry point's
+    /// [`Connection`](crate::connection::Connection) checks against a snapshot
+    /// of the catalog listed on the first registration and kept up to date with
+    /// that connection's own registrations, so an extension with many table
+    /// functions lists the catalog once per `LOAD` rather than once per
+    /// function. Being a one-time copy, the snapshot does not see a table
+    /// function registered on the raw connection after it was listed — by
+    /// another extension's `LOAD`, or by a direct call to this method — so a
+    /// later `register_table` under that name passes the check and `DuckDB`
+    /// silently drops the new function. The scalar check has the same gap.
+    ///
     /// Table functions registered through the C API live only in the
     /// in-memory system catalog and are never written to a database file, so
     /// a name found there is always a live conflict — not a leftover from an
@@ -424,7 +435,8 @@ impl TableFunctionBuilder {
     /// # Cost
     ///
     /// Each call lists the catalog once — one scan of `duckdb_functions()`,
-    /// about 13 ms on `DuckDB` 1.5.x. Registering through the entry point's
+    /// tens of milliseconds on `DuckDB` 1.5.x, hardware-dependent.
+    /// Registering through the entry point's
     /// [`Connection`](crate::connection::Connection) instead (its
     /// [`Registrar`](crate::connection::Registrar) methods) lists the catalog
     /// once per extension load, so an extension with many table functions

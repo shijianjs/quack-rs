@@ -263,10 +263,12 @@ pub struct Connection {
     /// rather than one per function (see
     /// [`TableFunctionBuilder::register`]).
     ///
-    /// SQL run directly on the raw handle during registration — a
-    /// `CREATE MACRO … AS TABLE`, another extension's `LOAD` — is not seen by
-    /// it, so what can go unseen is such a macro created in between, whose
-    /// collision with a later table function the check would then miss.
+    /// It is a one-time copy, so a table function registered on the raw handle
+    /// afterwards — another extension's `LOAD`, or a direct call to
+    /// [`TableFunctionBuilder::register`] — is not seen by it. A later
+    /// `register_table` under that name then passes the check and `DuckDB`
+    /// silently drops the new function, the failure the check exists to
+    /// prevent. The scalar snapshot above has the same gap.
     ///
     /// [`TableFunctionBuilder::register`]: crate::table::TableFunctionBuilder::register
     tables: core::cell::RefCell<Option<crate::table::collision::ExistingTableFunctions>>,
