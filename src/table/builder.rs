@@ -380,15 +380,19 @@ impl TableFunctionBuilder {
     /// # A name can be registered once
     ///
     /// `duckdb_register_table_function` adds the function to the system
-    /// catalog with `ALTER_ON_CONFLICT`, and for a table function that means
-    /// "keep the existing entry": the new function is dropped and the call
-    /// still returns success (`DuckSchemaEntry::AddEntryInternal`,
-    /// `src/catalog/catalog_entry/duck_schema_entry.cpp`). The C API has no
-    /// table function *sets*, so there is no way to add an overload to a name
-    /// that exists — a second `register` under the same name, a name another
-    /// extension registered, or a built-in's name (`range`, `read_csv`) would
-    /// silently leave the old function answering. `register` therefore
-    /// checks `duckdb_functions()` first and refuses a name that is already a
+    /// catalog, which keys table functions by name, and the C API has no table
+    /// function *sets*, so there is no way to add an overload to a name that
+    /// exists: the existing entry keeps answering. What the call reports about
+    /// the duplicate differs by release — v1.5.x asks for `ALTER_ON_CONFLICT`,
+    /// which keeps the existing entry, drops the new function and returns
+    /// success; v1.4.x leaves the default `ERROR_ON_CONFLICT`, so the catalog
+    /// throws and the call fails with no reason to report
+    /// (`DuckSchemaEntry::AddEntryInternal`,
+    /// `src/catalog/catalog_entry/duck_schema_entry.cpp`). A second `register`
+    /// under the same name, a name another extension registered, or a built-in's
+    /// name (`range`, `read_csv`) therefore does not take effect either way:
+    /// the old function keeps answering. So `register` checks
+    /// `duckdb_functions()` first and refuses a name that is already a
     /// table function or table macro in the system catalog (compared
     /// case-insensitively, as `DuckDB` resolves names).
     ///
@@ -400,8 +404,9 @@ impl TableFunctionBuilder {
     /// function. Being a one-time copy, the snapshot does not see a table
     /// function registered on the raw connection after it was listed — by
     /// another extension's `LOAD`, or by a direct call to this method — so a
-    /// later `register_table` under that name passes the check and `DuckDB`
-    /// silently drops the new function. The scalar check has the same gap.
+    /// later `register_table` under that name passes the check and is left to
+    /// `DuckDB`, which drops it with a success report on v1.5.x and fails the
+    /// call with no reason on v1.4.x. The scalar check has the same gap.
     ///
     /// Table functions registered through the C API live only in the
     /// in-memory system catalog and are never written to a database file, so

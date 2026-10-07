@@ -5,15 +5,17 @@
 
 //! Table function name collisions.
 //!
-//! `DuckDB`'s C API has no table function *sets*, so a name can be registered
-//! only once: `duckdb_register_table_function` adds the entry with
-//! `ALTER_ON_CONFLICT`, which for a table function means "keep the existing
-//! entry" — the new function is dropped and the call still reports success
+//! `DuckDB`'s C API has no table function *sets*, and the system catalog keys
+//! table functions by name rather than by signature, so a second registration
+//! under a name that already belongs to a table function or table macro never
+//! becomes an overload: the existing entry keeps answering. What the C API
+//! reports about it differs by release — v1.5.x asks for `ALTER_ON_CONFLICT`,
+//! which keeps the existing entry and returns success, dropping the new
+//! function silently; v1.4.x leaves the default `ERROR_ON_CONFLICT`, so the
+//! catalog throws and the C API turns that into a failure it cannot explain
 //! (`DuckSchemaEntry::AddEntryInternal`,
-//! `src/catalog/catalog_entry/duck_schema_entry.cpp`). Registering under a name
-//! that already belongs to a table function or table macro therefore leaves the
-//! old function answering, silently, so [`TableFunctionBuilder::register`]
-//! checks the catalog first.
+//! `src/catalog/catalog_entry/duck_schema_entry.cpp`). Neither names the
+//! conflict, so [`TableFunctionBuilder::register`] checks the catalog first.
 //!
 //! [`TableFunctionBuilder::register`]: crate::table::TableFunctionBuilder::register
 //!
@@ -106,8 +108,9 @@ impl ExistingTableFunctions {
         Err(ExtensionError::new(format!(
             "table function '{name}' already exists (a built-in, another extension's, or an \
              earlier registration). DuckDB's C API cannot add overloads to an existing table \
-             function: it would drop this registration and still report success, leaving the \
-             existing function to answer. Choose a different name."
+             function — the catalog keys them by name — so this registration would not take \
+             effect: v1.5.x drops it and reports success, v1.4.x fails the call, and the \
+             existing function keeps answering either way. Choose a different name."
         )))
     }
 }

@@ -267,8 +267,9 @@ pub struct Connection {
     /// afterwards — another extension's `LOAD`, or a direct call to
     /// [`TableFunctionBuilder::register`] — is not seen by it. A later
     /// `register_table` under that name then passes the check and `DuckDB`
-    /// silently drops the new function, the failure the check exists to
-    /// prevent. The scalar snapshot above has the same gap.
+    /// deals with the duplicate itself — dropping it with a success report on
+    /// v1.5.x, failing the call with no reason on v1.4.x — which is the failure
+    /// the check exists to prevent. The scalar snapshot above has the same gap.
     ///
     /// [`TableFunctionBuilder::register`]: crate::table::TableFunctionBuilder::register
     tables: core::cell::RefCell<Option<crate::table::collision::ExistingTableFunctions>>,

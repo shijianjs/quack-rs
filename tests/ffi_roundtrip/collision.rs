@@ -349,9 +349,10 @@ fn a_connection_refuses_a_taken_table_function_name() {
 /// The snapshot is a one-time copy, so a table function registered on the raw
 /// connection after it was listed is invisible to it — the gap the
 /// `Connection.tables` field documents, which the scalar snapshot shares. The
-/// second registration here is accepted and its function silently dropped by
-/// `DuckDB`; the test pins that as deliberate, so a future change to it is a
-/// decision rather than an accident.
+/// check therefore passes and the duplicate reaches `DuckDB`, whose half of the
+/// story is version-dependent: v1.5.x keeps the existing entry and reports
+/// success, v1.4.x fails the call because the catalog throws on the conflicting
+/// name. The test pins the gap, not `DuckDB`'s answer to it.
 #[test]
 fn a_registration_made_on_the_raw_connection_is_invisible_to_the_snapshot() {
     let fx = Fixture::open();
@@ -364,8 +365,15 @@ fn a_registration_made_on_the_raw_connection_is_invisible_to_the_snapshot() {
         table("registered_behind_its_back")
             .register(con.as_raw_connection())
             .expect("raw");
-        con.register_table(table("registered_behind_its_back"))
-            .expect("not in the snapshot, so the check misses it");
+        // The check does not see the name, so `DuckDB` is the one that gets to
+        // refuse the duplicate — a message-less failure on v1.4.x; v1.5.x
+        // reports success. Either way it must not be the check answering.
+        if let Err(e) = con.register_table(table("registered_behind_its_back")) {
+            assert!(
+                e.as_str().contains("duckdb_register_table_function failed"),
+                "the check refused a name the snapshot cannot hold: {e}"
+            );
+        }
     }
 }
 
